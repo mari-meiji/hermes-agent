@@ -42,9 +42,9 @@ class IngestTests(unittest.TestCase):
 
     def test_distinctive_excerpt_never_reaches_database_artifact_or_receipt(self):
         payload = parse_invocation(canonical_invocation(excerpt=DISTINCTIVE_EXCERPT)).payload
-        key = "sha256:" + "d" * 64
-        claim = self.store.claim_intake(key, "d" * 64, json.dumps(payload, sort_keys=True))
         plan = plan_update(payload, brain_root=self.brain)
+        key = plan.idempotency_key
+        claim = self.store.claim_intake(key, "d" * 64, json.dumps(payload, sort_keys=True))
         result = apply_update(plan, self.store)
         receipt = render_receipt(
             idempotency_key=key,

@@ -2,21 +2,19 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
 import re
 from typing import Any
 
+from email_brain_contract import ContractError, canonical_brain_capture_path
+
 _HASH = re.compile(r"^[0-9a-f]{64}$")
-_SAFE_PATH = re.compile(r"^[A-Za-z0-9._ /-]+$")
 
 
 def _safe_relative_path(value: object) -> str | None:
-    if not isinstance(value, str) or not _SAFE_PATH.fullmatch(value):
+    try:
+        return canonical_brain_capture_path(value)
+    except ContractError:
         return None
-    path = PurePosixPath(value)
-    if path.is_absolute() or ".." in path.parts:
-        return None
-    return path.as_posix()
 
 
 def _safe_verification(value: object) -> dict[str, Any]:

@@ -34,16 +34,16 @@ COMPLETED_RECEIPT = {
     "source": {"gmail_thread_id": "thread-1", "gmail_message_ids": ["m1"]},
     "result": {
         "durability": "captured",
-        "capture_note": "00 Inbox/example.md",
+        "capture_note": "00 Inbox/Email Captures/example.md",
         "updated_notes": [],
-        "created_notes": ["00 Inbox/example.md"],
+        "created_notes": ["00 Inbox/Email Captures/example.md"],
         "unchanged_notes": [],
     },
     "verification": {
         "brain_sync": "passed",
         "qmd_index": "passed",
         "retrieval_query": None,
-        "retrieved_paths": ["00 Inbox/example.md"],
+        "retrieved_paths": ["00 Inbox/Email Captures/example.md"],
         "content_hashes": {},
     },
     "review": {"required": False, "pending_capture_id": None, "discord_thread_id": None, "reason_codes": []},
@@ -66,11 +66,17 @@ class StoreTests(unittest.TestCase):
     def claim(self):
         return self.store.claim_intake(KEY, PAYLOAD_HASH, PAYLOAD_JSON)
 
+    def record_capture(self, path="00 Inbox/Email Captures/example.md"):
+        self.store.record_mutation(KEY, path, "capture", "c" * 64)
+
     def finish(self, claim, receipt=COMPLETED_RECEIPT):
+        if receipt is COMPLETED_RECEIPT and self.store.mutation_count(KEY) == 0:
+            self.record_capture()
         return self.store.finish_intake(KEY, claim.claim_token, receipt)
 
     def test_same_key_replays_stored_receipt(self):
         first = self.claim()
+        self.record_capture()
         self.assertEqual(first.kind, "process")
         self.finish(first)
         replay = self.store.claim_intake(KEY, PAYLOAD_HASH, PAYLOAD_JSON)
@@ -84,7 +90,7 @@ class StoreTests(unittest.TestCase):
         self.finish(claim)
         replay = self.store.claim_intake(KEY, CORRECTED_SUMMARY_HASH, CORRECTED_SUMMARY_JSON)
         self.assertEqual(replay.kind, "replay")
-        self.assertEqual(self.store.mutation_count(KEY), 1)
+        self.assertEqual(self.store.mutation_count(KEY), 2)
 
     def test_claim_never_persists_distinctive_excerpt_or_sender_address(self):
         claim = self.claim()
@@ -198,6 +204,101 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(row["claim_token"], claim.claim_token)
         self.assertIsNone(row["receipt_json"])
         self.assertEqual(self.store.mutation_count(KEY), 0)
+
+    def test_current_state_path_is_rejected_before_sqlite_persistence(self):
+        claim = self.claim()
+        marker = "AUDIT-CURRENT-STATE-LEAK"
+
+        with self.assertRaises(ContractError):
+            self.store.record_mutation(KEY, f"99 Archive/{marker}.md", "capture", "c" * 64)
+
+        row = self.store.connection.execute(
+            "SELECT status, claim_token, receipt_json FROM intake_receipts WHERE idempotency_key=?", (KEY,)
+        ).fetchone()
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["claim_token"], claim.claim_token)
+        self.assertIsNone(row["receipt_json"])
+        files = [self.db_path, self.db_path.with_name(self.db_path.name + "-wal"), self.db_path.with_name(self.db_path.name + "-shm")]
+        self.assertFalse(any(marker.encode() in path.read_bytes() for path in files if path.exists()))
+
+    def test_completed_capture_requires_a_recorded_capture_mutation(self):
+        claim = self.claim()
+        empty = json.loads(json.dumps(COMPLETED_RECEIPT))
+        empty["result"].update({"capture_note": None, "updated_notes": [], "created_notes": [], "unchanged_notes": []})
+        empty["verification"]["retrieved_paths"] = []
+
+        with self.assertRaises(ContractError):
+            self.store.finish_intake(KEY, claim.claim_token, empty)
+
+        row = self.store.connection.execute(
+            "SELECT status, claim_token, receipt_json FROM intake_receipts WHERE idempotency_key=?", (KEY,)
+        ).fetchone()
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["claim_token"], claim.claim_token)
+        self.assertIsNone(row["receipt_json"])
+
+    def test_receipt_paths_must_be_canonical_under_email_capture_root(self):
+        cases = (
+            ("capture_note", "../../AUDIT-PATH-LEAK-traversal"),
+            ("updated_notes", ["99 Archive/AUDIT-PATH-LEAK-off-root.md"]),
+            ("created_notes", ["00 Inbox/Email Captures/./AUDIT-PATH-LEAK-dot.md"]),
+            ("unchanged_notes", ["00 Inbox//Email Captures/AUDIT-PATH-LEAK-empty.md"]),
+            ("retrieved_paths", ["00 Inbox/Email Captures/AUDIT-PATH-LEAK-control\n.md"]),
+            ("capture_note", "00 Inbox/Email Captures/AUDIT-PATH-LEAK-unicode\u202e.md"),
+        )
+        for index, (field, value) in enumerate(cases):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tempdir:
+                key = "sha256:" + f"{index + 1:x}" * 64
+                db_path = Path(tempdir) / "email-brain.sqlite3"
+                store = EmailBrainStore(db_path)
+                try:
+                    claim = store.claim_intake(key, PAYLOAD_HASH, PAYLOAD_JSON)
+                    store.record_mutation(key, "00 Inbox/Email Captures/example.md", "capture", "c" * 64)
+                    malicious = json.loads(json.dumps(COMPLETED_RECEIPT))
+                    malicious["idempotency_key"] = key
+                    target = malicious["verification"] if field == "retrieved_paths" else malicious["result"]
+                    target[field] = value
+
+                    with self.assertRaises(ContractError):
+                        store.finish_intake(key, claim.claim_token, malicious)
+
+                    row = store.connection.execute(
+                        "SELECT status, claim_token, receipt_json FROM intake_receipts WHERE idempotency_key=?", (key,)
+                    ).fetchone()
+                    self.assertEqual(row["status"], "processing")
+                    self.assertEqual(row["claim_token"], claim.claim_token)
+                    self.assertIsNone(row["receipt_json"])
+                    marker = b"AUDIT-PATH-LEAK"
+                    files = [db_path, db_path.with_name(db_path.name + "-wal"), db_path.with_name(db_path.name + "-shm")]
+                    self.assertFalse(any(marker in path.read_bytes() for path in files if path.exists()))
+
+                    accepted = json.loads(json.dumps(COMPLETED_RECEIPT))
+                    accepted["idempotency_key"] = key
+                    store.finish_intake(key, claim.claim_token, accepted)
+                    replay = store.claim_intake(key, PAYLOAD_HASH, PAYLOAD_JSON)
+                    self.assertEqual(replay.kind, "replay")
+                    self.assertNotIn("AUDIT-PATH-LEAK", json.dumps(replay.receipt, sort_keys=True))
+                finally:
+                    store.close()
+
+    def test_receipt_paths_must_match_recorded_mutations(self):
+        claim = self.claim()
+        self.record_capture("00 Inbox/Email Captures/authoritative.md")
+        mismatched = json.loads(json.dumps(COMPLETED_RECEIPT))
+        caller_path = "00 Inbox/Email Captures/caller-supplied.md"
+        mismatched["result"]["capture_note"] = caller_path
+        mismatched["result"]["created_notes"] = [caller_path]
+        mismatched["verification"]["retrieved_paths"] = [caller_path]
+
+        with self.assertRaises(ContractError):
+            self.finish(claim, mismatched)
+
+        row = self.store.connection.execute(
+            "SELECT status, claim_token, receipt_json FROM intake_receipts WHERE idempotency_key=?", (KEY,)
+        ).fetchone()
+        self.assertEqual(row["status"], "processing")
+        self.assertEqual(row["claim_token"], claim.claim_token)
+        self.assertIsNone(row["receipt_json"])
 
     def test_review_compare_and_swap_is_single_use(self):
         pending = self.store.create_pending_review(KEY, payload=PAYLOAD_JSON, version=1)

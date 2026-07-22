@@ -19,6 +19,8 @@ SENSITIVITIES = {"normal", "confidential", "legal", "finance", "security"}
 SECRET_PATTERN = re.compile(r"(?:api[_-]?key|access[_-]?token|private[_-]?key|password)\s*[:=]|\bsk-[A-Za-z0-9_-]{6,}", re.I)
 INSTRUCTION_PATTERN = re.compile(r"\b(?:ignore|disregard|override)\b.{0,80}\b(?:policy|instruction|rules?)\b|\b(?:send|reply|archive|delete|schedule|disclose)\b", re.I | re.S)
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_SAFE_BRAIN_PATH_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*$")
+_BRAIN_CAPTURE_ROOT = ("00 Inbox", "Email Captures")
 
 
 class ContractError(ValueError):
@@ -53,6 +55,18 @@ def _reject_unsafe_text(value: str) -> None:
         raise ContractError("secret material is prohibited")
     if INSTRUCTION_PATTERN.search(value):
         raise ContractError("embedded instruction is prohibited")
+
+
+def canonical_brain_capture_path(value: object) -> str:
+    """Return the sole canonical persisted Brain capture path or reject it."""
+    if not isinstance(value, str) or not value or "\\" in value or any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise ContractError("receipt path must be a nonempty POSIX path without control characters")
+    parts = value.split("/")
+    if any(not part or part in {".", ".."} or part.endswith((".", " ")) or not _SAFE_BRAIN_PATH_SEGMENT.fullmatch(part) for part in parts):
+        raise ContractError("receipt path contains ambiguous or unsafe segments")
+    if tuple(parts[:2]) != _BRAIN_CAPTURE_ROOT or len(parts) < 3:
+        raise ContractError("receipt path is outside the approved Brain capture root")
+    return "/".join(parts)
 
 
 def validate_payload(payload: dict[str, Any]) -> None:
@@ -159,6 +173,14 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
         raise ContractError("invalid receipt result")
     if not isinstance(verification, dict) or set(verification) != {"brain_sync", "qmd_index", "retrieval_query", "retrieved_paths", "content_hashes"} or verification["brain_sync"] not in {"passed", "failed", "not_run"} or verification["qmd_index"] not in {"passed", "failed", "not_run"} or verification["retrieval_query"] is not None or not isinstance(verification["retrieved_paths"], list) or any(not isinstance(path, str) for path in verification["retrieved_paths"]) or not isinstance(verification["content_hashes"], dict) or set(verification["content_hashes"]) - {"capture"} or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in verification["content_hashes"].values()):
         raise ContractError("invalid receipt verification")
+    for path in (
+        *(item for item in [result["capture_note"]] if item is not None),
+        *result["updated_notes"],
+        *result["created_notes"],
+        *result["unchanged_notes"],
+        *verification["retrieved_paths"],
+    ):
+        canonical_brain_capture_path(path)
     if not isinstance(review, dict) or set(review) != {"required", "pending_capture_id", "discord_thread_id", "reason_codes"} or not isinstance(review["required"], bool) or review["pending_capture_id"] is not None or review["discord_thread_id"] is not None or not isinstance(review["reason_codes"], list) or any(not isinstance(code, str) for code in review["reason_codes"]):
         raise ContractError("invalid receipt review")
     if not isinstance(error, dict) or set(error) != {"code", "message", "retry_after_seconds"} or error["code"] is not None or error["message"] is not None or not isinstance(error["retry_after_seconds"], int):

@@ -9,7 +9,7 @@ import sqlite3
 import uuid
 from typing import Any
 
-from email_brain_contract import ContractError, validate_receipt
+from email_brain_contract import ContractError, canonical_brain_capture_path, validate_receipt
 
 
 @dataclass(frozen=True)
@@ -200,7 +200,26 @@ class EmailBrainStore:
             }
             if receipt["source"] != expected_source:
                 raise ContractError("receipt source does not match active claim")
+            mutation_paths = sorted({
+                canonical_brain_capture_path(row["artifact_path"])
+                for row in self.connection.execute(
+                    "SELECT artifact_path FROM brain_mutations WHERE idempotency_key=? AND mutation_type='capture'",
+                    (idempotency_key,),
+                )
+            })
+            expected_result_paths = {
+                "capture_note": mutation_paths[0] if len(mutation_paths) == 1 else None,
+                "updated_notes": [],
+                "created_notes": mutation_paths,
+                "unchanged_notes": [],
+            }
+            if receipt["status"] == "completed" and receipt["result"]["durability"] == "captured" and not mutation_paths:
+                raise ContractError("completed captured receipt requires a recorded Brain mutation")
+            if any(receipt["result"][field] != expected for field, expected in expected_result_paths.items()) or receipt["verification"]["retrieved_paths"] != mutation_paths:
+                raise ContractError("receipt paths do not match recorded Brain mutations")
             stored = dict(receipt)
+            stored["result"] = {"durability": receipt["result"]["durability"], **expected_result_paths}
+            stored["verification"] = {**receipt["verification"], "retrieved_paths": mutation_paths}
             stored["idempotent_replay"] = False
             status = stored.get("status", "completed")
             result = self.connection.execute(
@@ -220,6 +239,8 @@ class EmailBrainStore:
             raise
 
     def record_mutation(self, idempotency_key: str, artifact_path: str, mutation_type: str, content_hash: str) -> None:
+        if mutation_type != "receipt_finalized":
+            artifact_path = canonical_brain_capture_path(artifact_path)
         self._begin()
         try:
             self.connection.execute(

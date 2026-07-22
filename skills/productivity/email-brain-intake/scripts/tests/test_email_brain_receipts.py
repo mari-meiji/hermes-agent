@@ -16,8 +16,8 @@ class ReceiptTests(unittest.TestCase):
         receipt = render_receipt(
             idempotency_key="sha256:" + "a" * 64,
             payload={"gmail_thread_id": "thread-1", "gmail_message_ids": ["m1"]},
-            capture_note="00 Inbox/Capture.md",
-            verification={"brain_sync": "passed", "qmd_index": "passed", "retrieval_query": "Acme", "retrieved_paths": ["00 Inbox/Capture.md"], "content_hashes": {}},
+            capture_note="00 Inbox/Email Captures/Capture.md",
+            verification={"brain_sync": "passed", "qmd_index": "passed", "retrieval_query": "Acme", "retrieved_paths": ["00 Inbox/Email Captures/Capture.md"], "content_hashes": {}},
         )
         validate_receipt(receipt)
         self.assertNotIn("body_excerpt", str(receipt))
@@ -26,12 +26,12 @@ class ReceiptTests(unittest.TestCase):
         receipt = render_receipt(
             idempotency_key="sha256:" + "a" * 64,
             payload={"gmail_thread_id": "thread-1", "gmail_message_ids": ["m1"]},
-            capture_note="00 Inbox/Capture.md",
+            capture_note="00 Inbox/Email Captures/Capture.md",
             verification={
                 "brain_sync": "passed",
                 "qmd_index": "passed",
                 "retrieval_query": LEAK,
-                "retrieved_paths": ["00 Inbox/Capture.md", f"/tmp/{LEAK}"],
+                "retrieved_paths": ["00 Inbox/Email Captures/Capture.md", f"/tmp/{LEAK}"],
                 "content_hashes": {"capture": "a" * 64, "nested": {"error": LEAK}},
                 "result": {"sender": "sender@example.com", "body": LEAK},
                 "error": {"message": LEAK},
@@ -44,7 +44,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertNotIn("sender@example.com", serialized)
         self.assertEqual(receipt["verification"]["brain_sync"], "passed")
         self.assertEqual(receipt["verification"]["qmd_index"], "passed")
-        self.assertEqual(receipt["verification"]["retrieved_paths"], ["00 Inbox/Capture.md"])
+        self.assertEqual(receipt["verification"]["retrieved_paths"], ["00 Inbox/Email Captures/Capture.md"])
         self.assertEqual(receipt["verification"]["content_hashes"], {"capture": "a" * 64})
         validate_receipt(receipt)
 
