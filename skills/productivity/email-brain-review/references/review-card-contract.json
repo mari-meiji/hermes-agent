@@ -1,0 +1,1 @@
+{"type":"object","required":["pending_capture_id","sensitivity","proposed_operation"],"additionalProperties":false,"properties":{"pending_capture_id":{"type":"string"},"sensitivity":{"enum":["confidential","legal","finance","security"]},"proposed_operation":{"const":"capture redacted durable context"}}}

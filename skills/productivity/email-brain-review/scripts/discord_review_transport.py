@@ -1,0 +1,13 @@
+"""Transport protocol for the restricted review workflow.
+
+A real adapter must prove its configured parent has only Adam and Mari before
+calling create_thread or post. The test FakeDiscord lives in email_brain_review.
+"""
+from typing import Protocol
+
+
+class RestrictedDiscordTransport(Protocol):
+    def verify_restricted_parent(self, parent_channel_id: str, adam_id: str) -> bool: ...
+    def create_thread(self, parent_channel_id: str, title: str) -> str: ...
+    def post(self, thread_id: str, content: str, *, mentions: list[str]) -> None: ...
+    def archive(self, thread_id: str) -> None: ...

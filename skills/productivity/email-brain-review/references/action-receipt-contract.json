@@ -1,0 +1,1 @@
+{"type":"object","required":["status","pending_capture_id","action"],"additionalProperties":false,"properties":{"status":{"enum":["completed","rejected","expired","failed_retryable","failed_terminal"]},"pending_capture_id":{"type":"string"},"action":{"enum":["approve","reject","request_safer_summary"]}}}
