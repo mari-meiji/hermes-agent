@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Email Brain Receipt v1","type":"object","required":["type","schema_version","status","idempotency_key","idempotent_replay","source","result","verification","review","error","processed_at"],"properties":{"type":{"const":"email_brain_receipt"},"schema_version":{"const":"1.0"}}}

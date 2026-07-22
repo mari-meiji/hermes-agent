@@ -1,1 +1,0 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"Email Brain Intake v1","type":"object","required":["operation","schema_version","payload"],"properties":{"operation":{"const":"email_brain_intake"},"schema_version":{"const":"1.0"},"payload":{"type":"object"}}}
