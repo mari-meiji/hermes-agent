@@ -148,6 +148,18 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
         raise ContractError("invalid receipt idempotency_key")
     if not isinstance(receipt["idempotent_replay"], bool):
         raise ContractError("invalid receipt idempotent_replay")
-    for forbidden in ("body_excerpt", "@", "api_key", "token", "private_key"):
-        if forbidden in json.dumps(receipt, sort_keys=True).lower():
-            raise ContractError("receipt contains prohibited sensitive content")
+    source = receipt["source"]
+    result = receipt["result"]
+    verification = receipt["verification"]
+    review = receipt["review"]
+    error = receipt["error"]
+    if not isinstance(source, dict) or set(source) != {"gmail_thread_id", "gmail_message_ids"} or not isinstance(source["gmail_thread_id"], str) or not isinstance(source["gmail_message_ids"], list) or any(not isinstance(message_id, str) for message_id in source["gmail_message_ids"]):
+        raise ContractError("invalid receipt source")
+    if not isinstance(result, dict) or set(result) != {"durability", "capture_note", "updated_notes", "created_notes", "unchanged_notes"} or not isinstance(result["durability"], str) or (result["capture_note"] is not None and not isinstance(result["capture_note"], str)) or any(not isinstance(result[name], list) or any(not isinstance(path, str) for path in result[name]) for name in ("updated_notes", "created_notes", "unchanged_notes")):
+        raise ContractError("invalid receipt result")
+    if not isinstance(verification, dict) or set(verification) != {"brain_sync", "qmd_index", "retrieval_query", "retrieved_paths", "content_hashes"} or verification["brain_sync"] not in {"passed", "failed", "not_run"} or verification["qmd_index"] not in {"passed", "failed", "not_run"} or verification["retrieval_query"] is not None or not isinstance(verification["retrieved_paths"], list) or any(not isinstance(path, str) for path in verification["retrieved_paths"]) or not isinstance(verification["content_hashes"], dict) or set(verification["content_hashes"]) - {"capture"} or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in verification["content_hashes"].values()):
+        raise ContractError("invalid receipt verification")
+    if not isinstance(review, dict) or set(review) != {"required", "pending_capture_id", "discord_thread_id", "reason_codes"} or not isinstance(review["required"], bool) or review["pending_capture_id"] is not None or review["discord_thread_id"] is not None or not isinstance(review["reason_codes"], list) or any(not isinstance(code, str) for code in review["reason_codes"]):
+        raise ContractError("invalid receipt review")
+    if not isinstance(error, dict) or set(error) != {"code", "message", "retry_after_seconds"} or error["code"] is not None or error["message"] is not None or not isinstance(error["retry_after_seconds"], int):
+        raise ContractError("invalid receipt error")

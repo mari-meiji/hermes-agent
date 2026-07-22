@@ -13,6 +13,7 @@ from typing import Any
 @dataclass(frozen=True)
 class ClaimResult:
     kind: str
+    claim_token: str | None = None
     receipt: dict[str, Any] | None = None
 
 
@@ -26,6 +27,41 @@ class ReviewResolution:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _payload_object(payload_json: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(payload_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("payload_json must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("payload_json must be an object")
+    return payload
+
+
+def _minimize_payload(payload_json: str) -> str:
+    """Keep only server-authoritative fields needed for recovery/review.
+
+    Source excerpts, sender identity, account, URL, and unknown input keys are
+    intentionally excluded from all SQLite payload storage.
+    """
+    payload = _payload_object(payload_json)
+    action = payload.get("action_context") if isinstance(payload.get("action_context"), dict) else {}
+    entities = payload.get("entities") if isinstance(payload.get("entities"), dict) else {}
+    normalized = {
+        "schema_version": payload.get("schema_version"),
+        "source": payload.get("source"),
+        "gmail_thread_id": payload.get("gmail_thread_id"),
+        "gmail_message_ids": sorted(set(payload.get("gmail_message_ids", []))),
+        "received_at": payload.get("received_at"),
+        "subject": payload.get("subject"),
+        "triage_summary": payload.get("triage_summary"),
+        "durable_signals": payload.get("durable_signals", []),
+        "entities": {name: entities.get(name, []) for name in ("people", "projects", "areas")},
+        "action_context": {name: action.get(name, "") for name in ("recommended_next_action", "owner", "deadline")},
+        "sensitivity": payload.get("sensitivity"),
+    }
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 class EmailBrainStore:
@@ -49,6 +85,7 @@ class EmailBrainStore:
           payload_hash TEXT NOT NULL,
           payload_json TEXT NOT NULL,
           status TEXT NOT NULL,
+          claim_token TEXT,
           receipt_json TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -91,46 +128,69 @@ class EmailBrainStore:
           PRIMARY KEY(pending_capture_id, kind)
         );
         """)
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(intake_receipts)")}
+        if "claim_token" not in columns:
+            self.connection.execute("ALTER TABLE intake_receipts ADD COLUMN claim_token TEXT")
 
     def _begin(self) -> None:
         self.connection.execute("BEGIN IMMEDIATE")
 
     def claim_intake(self, idempotency_key: str, payload_hash: str, payload_json: str) -> ClaimResult:
+        minimized_payload = _minimize_payload(payload_json)
         self._begin()
         try:
-            row = self.connection.execute("SELECT status, receipt_json FROM intake_receipts WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            row = self.connection.execute(
+                "SELECT status, receipt_json FROM intake_receipts WHERE idempotency_key=?", (idempotency_key,)
+            ).fetchone()
             if row is None:
                 now = _now()
+                token = str(uuid.uuid4())
                 self.connection.execute(
-                    "INSERT INTO intake_receipts VALUES (?, ?, ?, 'processing', NULL, ?, ?)",
-                    (idempotency_key, payload_hash, payload_json, now, now),
+                    "INSERT INTO intake_receipts (idempotency_key, payload_hash, payload_json, status, claim_token, receipt_json, created_at, updated_at) VALUES (?, ?, ?, 'processing', ?, NULL, ?, ?)",
+                    (idempotency_key, payload_hash, minimized_payload, token, now, now),
                 )
                 self.connection.commit()
-                return ClaimResult("process")
+                return ClaimResult("process", token)
             if row["receipt_json"] is not None:
                 receipt = json.loads(row["receipt_json"])
                 receipt["status"] = "duplicate"
                 receipt["idempotent_replay"] = True
                 self.connection.commit()
-                return ClaimResult("replay", receipt)
+                return ClaimResult("replay", receipt=receipt)
             self.connection.commit()
             return ClaimResult("in_progress")
         except Exception:
             self.connection.rollback()
             raise
 
-    def finish_intake(self, idempotency_key: str, receipt: dict[str, Any]) -> dict[str, Any]:
+    def release_claim_for_retry(self, idempotency_key: str, claim_token: str) -> None:
+        self._begin()
+        try:
+            result = self.connection.execute(
+                "DELETE FROM intake_receipts WHERE idempotency_key=? AND status='processing' AND claim_token=?",
+                (idempotency_key, claim_token),
+            )
+            if result.rowcount != 1:
+                raise RuntimeError("claim is not active")
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def finish_intake(self, idempotency_key: str, claim_token: str | None, receipt: dict[str, Any]) -> dict[str, Any]:
+        if not claim_token:
+            raise RuntimeError("claim token is required")
         self._begin()
         try:
             stored = dict(receipt)
             stored["idempotent_replay"] = False
             status = stored.get("status", "completed")
             result = self.connection.execute(
-                "UPDATE intake_receipts SET status=?, receipt_json=?, updated_at=? WHERE idempotency_key=?",
-                (status, json.dumps(stored, sort_keys=True, separators=(",", ":")), _now(), idempotency_key),
+                "UPDATE intake_receipts SET status=?, claim_token=NULL, receipt_json=?, updated_at=? WHERE idempotency_key=? AND status='processing' AND claim_token=?",
+                (status, json.dumps(stored, sort_keys=True, separators=(",", ":")), _now(), idempotency_key, claim_token),
             )
             if result.rowcount != 1:
-                raise KeyError("unknown idempotency key")
+                raise RuntimeError("claim is stale, foreign, or already finalized")
             self.connection.execute(
                 "INSERT OR IGNORE INTO brain_mutations (idempotency_key, artifact_path, mutation_type, content_hash) VALUES (?, ?, ?, ?)",
                 (idempotency_key, "__receipt__", "receipt_finalized", idempotency_key),
@@ -159,11 +219,12 @@ class EmailBrainStore:
     def create_pending_review(self, idempotency_key: str, *, payload: str, version: int) -> str:
         pending_id = str(uuid.uuid4())
         expires = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat().replace("+00:00", "Z")
+        minimized_payload = _minimize_payload(payload)
         self._begin()
         try:
             self.connection.execute(
                 "INSERT INTO pending_reviews VALUES (?, ?, ?, 'pending', ?, ?)",
-                (pending_id, idempotency_key, version, payload, expires),
+                (pending_id, idempotency_key, version, minimized_payload, expires),
             )
             self.connection.commit()
             return pending_id
