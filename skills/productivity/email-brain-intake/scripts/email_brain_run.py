@@ -135,7 +135,8 @@ def execute_invocation(text: str, *, state_path: str | Path, brain_root: str | P
             verification = sync_and_verify(mutation, runner)
         except VerificationPending:
             receipt = _terminal_error(payload=payload, key=key, code="verification_pending", retryable=True)
-            return store.finish_intake(key, claim.claim_token, receipt)
+            store.release_claim_for_retry(key, claim.claim_token)
+            return receipt
         receipt = render_receipt(
             idempotency_key=key, payload=payload, capture_note=plan.relative_path,
             verification={

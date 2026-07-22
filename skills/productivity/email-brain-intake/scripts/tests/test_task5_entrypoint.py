@@ -70,6 +70,29 @@ class Task5EntrypointTests(unittest.TestCase):
         self.assertEqual(receipt["result"]["durability"], "not_durable")
         self.assertEqual(list(self.brain.rglob("*.md")), [])
 
+    def test_verification_pending_releases_claim_and_reconciles_on_retry(self):
+        expected = "00 Inbox/Email Captures/2026-07-21 - Launch - Launch commitment.md"
+
+        first = execute_invocation(
+            self._invoke(),
+            state_path=self.state,
+            brain_root=self.brain,
+            runner=self.runner,
+        )
+        self.runner.paths = [expected]
+        second = execute_invocation(
+            self._invoke(),
+            state_path=self.state,
+            brain_root=self.brain,
+            runner=self.runner,
+        )
+
+        self.assertEqual(first["status"], "failed_retryable")
+        self.assertEqual(first["error"]["code"], "verification_pending")
+        self.assertEqual(second["status"], "completed")
+        self.assertEqual(second["result"]["capture_note"], expected)
+        self.assertEqual(len(list(self.brain.rglob("*.md"))), 1)
+
     def test_unmarked_or_production_root_is_refused_before_mutation(self):
         unsafe = Path(self.tmp.name) / "unsafe-root"
         unsafe.mkdir()
