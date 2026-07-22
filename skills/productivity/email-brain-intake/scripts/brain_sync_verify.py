@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import subprocess
 from typing import Any
 
@@ -21,6 +22,9 @@ class VerificationResult:
 
 
 class SystemRunner:
+    def __init__(self, brain_root: str | Path = "/Users/agent/obsidian-brain"):
+        self.brain_root = Path(brain_root).resolve()
+
     def sync(self) -> None:
         subprocess.run(["/Users/agent/.hermes/scripts/obsidian_brain_sync.sh"], check=True, capture_output=True, text=True, timeout=300)
 

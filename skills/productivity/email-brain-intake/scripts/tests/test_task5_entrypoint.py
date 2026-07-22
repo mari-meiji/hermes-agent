@@ -2,6 +2,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -76,6 +77,65 @@ class Task5EntrypointTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "failed_terminal")
         self.assertEqual(receipt["error"]["code"], "unsafe_brain_root")
         self.assertEqual(list(unsafe.rglob("*.md")), [])
+
+    def test_explicitly_approved_production_root_is_accepted(self):
+        brain = (Path(self.tmp.name) / "obsidian-brain").resolve()
+        brain.mkdir()
+        (brain / ".email-brain-approved").write_text("email-brain-root-v1\n")
+        (brain / "00 Inbox" / "Email Captures").mkdir(parents=True)
+        runner = DisposableRunner(brain)
+        expected = "00 Inbox/Email Captures/2026-07-21 - Launch - Launch commitment.md"
+        runner.paths = [expected]
+
+        receipt = execute_invocation(
+            self._invoke(),
+            state_path=self.state,
+            brain_root=brain,
+            runner=runner,
+        )
+
+        self.assertEqual(receipt["status"], "completed")
+        self.assertEqual(receipt["result"]["capture_note"], expected)
+        self.assertTrue(runner.synced)
+
+    def test_approved_production_root_builds_the_system_runner_by_default(self):
+        brain = (Path(self.tmp.name) / "obsidian-brain").resolve()
+        brain.mkdir()
+        (brain / ".email-brain-approved").write_text("email-brain-root-v1\n")
+        (brain / "00 Inbox" / "Email Captures").mkdir(parents=True)
+        runner = DisposableRunner(brain)
+        expected = "00 Inbox/Email Captures/2026-07-21 - Launch - Launch commitment.md"
+        runner.paths = [expected]
+
+        with patch("email_brain_run.SystemRunner", return_value=runner) as factory:
+            receipt = execute_invocation(
+                self._invoke(),
+                state_path=self.state,
+                brain_root=brain,
+            )
+
+        factory.assert_called_once_with(brain)
+        self.assertEqual(receipt["status"], "completed")
+
+    def test_approved_root_rejects_a_symlinked_capture_directory(self):
+        brain = (Path(self.tmp.name) / "obsidian-brain").resolve()
+        outside = (Path(self.tmp.name) / "outside").resolve()
+        brain.mkdir()
+        outside.mkdir()
+        (brain / ".email-brain-approved").write_text("email-brain-root-v1\n")
+        (brain / "00 Inbox").mkdir()
+        (brain / "00 Inbox" / "Email Captures").symlink_to(outside, target_is_directory=True)
+
+        receipt = execute_invocation(
+            self._invoke(),
+            state_path=self.state,
+            brain_root=brain,
+            runner=DisposableRunner(brain),
+        )
+
+        self.assertEqual(receipt["status"], "failed_terminal")
+        self.assertEqual(receipt["error"]["code"], "unsafe_brain_root")
+        self.assertEqual(list(outside.rglob("*.md")), [])
 
     def test_sensitive_capture_is_fail_closed_when_review_surface_is_not_verified(self):
         receipt = execute_invocation(self._invoke(sensitivity="finance"), state_path=self.state, brain_root=self.brain, runner=self.runner)

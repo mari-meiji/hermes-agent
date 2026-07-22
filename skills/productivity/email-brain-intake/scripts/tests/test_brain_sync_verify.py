@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from brain_sync_verify import VerificationPending, sync_and_verify
+from brain_sync_verify import SystemRunner, VerificationPending, sync_and_verify
 from email_brain_ingest import MutationResult
 
 
@@ -28,6 +28,10 @@ MUTATION_RESULT = MutationResult(
 
 
 class SyncVerifyTests(unittest.TestCase):
+    def test_system_runner_exposes_its_canonical_brain_root(self):
+        runner = SystemRunner("/Users/agent/obsidian-brain")
+        self.assertEqual(str(runner.brain_root), "/Users/agent/obsidian-brain")
+
     def test_verification_requires_expected_path(self):
         runner = FakeRunner(qmd_paths=["25 People/Other.md"])
         with self.assertRaises(VerificationPending):

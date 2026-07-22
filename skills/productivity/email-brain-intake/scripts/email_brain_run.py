@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from brain_sync_verify import VerificationPending, sync_and_verify
+from brain_sync_verify import SystemRunner, VerificationPending, sync_and_verify
 from email_brain_contract import ContractError, idempotency_key, parse_invocation
 from email_brain_ingest import apply_update, plan_update
 from email_brain_receipts import render_receipt
@@ -56,14 +56,35 @@ def _malformed_receipt(code: str) -> dict[str, Any]:
     }
 
 
-def _verified_disposable_root(value: str | Path) -> Path | None:
+def _verified_brain_root(value: str | Path) -> Path | None:
     root = Path(value)
     try:
         resolved = root.resolve(strict=True)
     except OSError:
         return None
-    marker = resolved / ".email-brain-disposable"
-    if root != resolved or not resolved.name.startswith("email-brain-disposable-") or not marker.is_file() or marker.is_symlink():
+    if root != resolved:
+        return None
+    disposable_marker = resolved / ".email-brain-disposable"
+    if (
+        resolved.name.startswith("email-brain-disposable-")
+        and disposable_marker.is_file()
+        and not disposable_marker.is_symlink()
+    ):
+        return resolved
+    approved_marker = resolved / ".email-brain-approved"
+    capture_root = resolved / "00 Inbox" / "Email Captures"
+    try:
+        marker_value = approved_marker.read_text(encoding="utf-8")
+        resolved_capture_root = capture_root.resolve(strict=True)
+    except OSError:
+        return None
+    if (
+        approved_marker.is_symlink()
+        or marker_value != "email-brain-root-v1\n"
+        or capture_root.is_symlink()
+        or resolved_capture_root != capture_root
+        or not capture_root.is_dir()
+    ):
         return None
     return resolved
 
@@ -76,11 +97,11 @@ def execute_invocation(text: str, *, state_path: str | Path, brain_root: str | P
         return _malformed_receipt("invalid_invocation")
     payload = invocation.payload
     key = idempotency_key(payload)
-    safe_root = _verified_disposable_root(brain_root)
+    safe_root = _verified_brain_root(brain_root)
     if safe_root is None:
         return _terminal_error(payload=payload, key=key, code="unsafe_brain_root", retryable=False)
     if runner is None:
-        return _terminal_error(payload=payload, key=key, code="disposable_verifier_required", retryable=True)
+        runner = SystemRunner(safe_root)
     try:
         runner_root = Path(runner.brain_root).resolve(strict=True)
     except (AttributeError, OSError, TypeError):
