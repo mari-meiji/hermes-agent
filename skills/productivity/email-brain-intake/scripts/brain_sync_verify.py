@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import subprocess
 from typing import Any
 
@@ -32,7 +33,21 @@ class SystemRunner:
         completed = subprocess.run(["qmd", "query", query, "-c", "obsidian-brain", "--json", "--no-rerank"], check=True, capture_output=True, text=True, timeout=300)
         value: Any = json.loads(completed.stdout)
         rows = value if isinstance(value, list) else value.get("results", [])
-        return [str(row.get("path", "")) for row in rows if isinstance(row, dict)]
+        return [
+            str(row.get("path") or row.get("file"))
+            for row in rows
+            if isinstance(row, dict) and (row.get("path") or row.get("file"))
+        ]
+
+
+def _normalized_qmd_path(value: str) -> str:
+    path = value.replace("\\", "/")
+    if path.startswith("qmd://"):
+        path = path.split("/", 3)[-1]
+    return "/".join(
+        re.sub(r"[^a-z0-9.]+", "-", part.lower()).strip("-")
+        for part in path.strip("/").split("/")
+    )
 
 
 def sync_and_verify(result: Any, runner: Any | None = None) -> VerificationResult:
@@ -53,6 +68,7 @@ def sync_and_verify(result: Any, runner: Any | None = None) -> VerificationResul
         if path.replace("\\", "/") == expected
         or path.replace("\\", "/").endswith(expected)
         or expected.endswith("/" + path.replace("\\", "/").lstrip("/"))
+        or _normalized_qmd_path(path) == _normalized_qmd_path(expected)
     ]
     if not matched:
         raise VerificationPending("expected artifact was not retrievable")

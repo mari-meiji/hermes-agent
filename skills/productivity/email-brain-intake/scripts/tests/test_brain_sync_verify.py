@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,6 +33,19 @@ class SyncVerifyTests(unittest.TestCase):
         runner = SystemRunner("/Users/agent/obsidian-brain")
         self.assertEqual(str(runner.brain_root), "/Users/agent/obsidian-brain")
 
+    def test_system_runner_reads_file_from_current_qmd_json(self):
+        completed = type(
+            "Completed",
+            (),
+            {"stdout": '[{"file":"qmd://obsidian-brain/00-inbox/email-captures/capture.md"}]'},
+        )()
+        with patch("brain_sync_verify.subprocess.run", return_value=completed):
+            paths = SystemRunner().query("capture")
+        self.assertEqual(
+            paths,
+            ["qmd://obsidian-brain/00-inbox/email-captures/capture.md"],
+        )
+
     def test_verification_requires_expected_path(self):
         runner = FakeRunner(qmd_paths=["25 People/Other.md"])
         with self.assertRaises(VerificationPending):
@@ -41,6 +55,12 @@ class SyncVerifyTests(unittest.TestCase):
         runner = FakeRunner(qmd_paths=[MUTATION_RESULT.capture_note])
         result = sync_and_verify(MUTATION_RESULT, runner)
         self.assertEqual(result.retrieved_paths, [MUTATION_RESULT.capture_note])
+
+    def test_verification_accepts_normalized_qmd_uri(self):
+        qmd_uri = "qmd://obsidian-brain/00-inbox/email-captures/2026-07-21-acme-launch.md"
+        runner = FakeRunner(qmd_paths=[qmd_uri])
+        result = sync_and_verify(MUTATION_RESULT, runner)
+        self.assertEqual(result.retrieved_paths, [qmd_uri])
 
 
 if __name__ == "__main__":
