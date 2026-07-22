@@ -42,7 +42,14 @@ def sync_and_verify(result: Any, runner: Any | None = None) -> VerificationResul
     except Exception as exc:
         raise VerificationPending("qmd indexing/query failed") from exc
     expected = result.capture_note.replace("\\", "/")
-    matched = [path for path in paths if path.replace("\\", "/") == expected or path.replace("\\", "/").endswith(expected)]
+    # QMD commonly returns a vault-relative path while the deterministic writer
+    # holds an absolute disposable-Brain path. Match only exact path boundaries.
+    matched = [
+        path for path in paths
+        if path.replace("\\", "/") == expected
+        or path.replace("\\", "/").endswith(expected)
+        or expected.endswith("/" + path.replace("\\", "/").lstrip("/"))
+    ]
     if not matched:
         raise VerificationPending("expected artifact was not retrievable")
     return VerificationResult("passed", "passed", result.retrieval_query, matched, {expected: result.content_hash})

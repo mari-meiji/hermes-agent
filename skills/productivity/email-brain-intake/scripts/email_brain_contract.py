@@ -181,10 +181,17 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
         *verification["retrieved_paths"],
     ):
         canonical_brain_capture_path(path)
-    if not isinstance(review, dict) or set(review) != {"required", "pending_capture_id", "discord_thread_id", "reason_codes"} or not isinstance(review["required"], bool) or review["pending_capture_id"] is not None or review["discord_thread_id"] is not None or not isinstance(review["reason_codes"], list) or any(not isinstance(code, str) for code in review["reason_codes"]):
+    if not isinstance(review, dict) or set(review) != {"required", "pending_capture_id", "discord_thread_id", "reason_codes"} or not isinstance(review["required"], bool) or (review["pending_capture_id"] is not None and (not isinstance(review["pending_capture_id"], str) or not review["pending_capture_id"])) or (review["discord_thread_id"] is not None and (not isinstance(review["discord_thread_id"], str) or not review["discord_thread_id"])) or not isinstance(review["reason_codes"], list) or any(not isinstance(code, str) for code in review["reason_codes"]):
         raise ContractError("invalid receipt review")
-    if not isinstance(error, dict) or set(error) != {"code", "message", "retry_after_seconds"} or error["code"] is not None or error["message"] is not None or not isinstance(error["retry_after_seconds"], int):
+    if receipt["status"] in {"review_required", "rejected", "expired"} and (not review["required"] or review["pending_capture_id"] is None):
+        raise ContractError("review lifecycle receipt requires a pending capture")
+    if not isinstance(error, dict) or set(error) != {"code", "message", "retry_after_seconds"} or not isinstance(error["retry_after_seconds"], int) or error["retry_after_seconds"] < 0:
         raise ContractError("invalid receipt error")
+    if receipt["status"] in {"completed", "duplicate", "review_required", "rejected", "expired"}:
+        if error["code"] is not None or error["message"] is not None or error["retry_after_seconds"] != 0:
+            raise ContractError("terminal receipt must not contain an error")
+    elif error["code"] is not None and (not isinstance(error["code"], str) or not error["code"] or error["message"] is not None):
+        raise ContractError("failed receipt error must be a safe code only")
     processed_at = _require_string(receipt, "processed_at", maximum=64)
     _validate_rfc3339(processed_at)
     safe_text = [
