@@ -163,3 +163,18 @@ def validate_receipt(receipt: dict[str, Any]) -> None:
         raise ContractError("invalid receipt review")
     if not isinstance(error, dict) or set(error) != {"code", "message", "retry_after_seconds"} or error["code"] is not None or error["message"] is not None or not isinstance(error["retry_after_seconds"], int):
         raise ContractError("invalid receipt error")
+    processed_at = _require_string(receipt, "processed_at", maximum=64)
+    _validate_rfc3339(processed_at)
+    safe_text = [
+        receipt["source"]["gmail_thread_id"],
+        *receipt["source"]["gmail_message_ids"],
+        receipt["result"]["durability"],
+        *(item for item in [receipt["result"]["capture_note"]] if item is not None),
+        *receipt["result"]["updated_notes"],
+        *receipt["result"]["created_notes"],
+        *receipt["result"]["unchanged_notes"],
+        *receipt["verification"]["retrieved_paths"],
+        *receipt["review"]["reason_codes"],
+    ]
+    for value in safe_text:
+        _reject_unsafe_text(value)

@@ -9,6 +9,8 @@ import sqlite3
 import uuid
 from typing import Any
 
+from email_brain_contract import ContractError, validate_receipt
+
 
 @dataclass(frozen=True)
 class ClaimResult:
@@ -180,8 +182,24 @@ class EmailBrainStore:
     def finish_intake(self, idempotency_key: str, claim_token: str | None, receipt: dict[str, Any]) -> dict[str, Any]:
         if not claim_token:
             raise RuntimeError("claim token is required")
+        validate_receipt(receipt)
+        if receipt["idempotency_key"] != idempotency_key:
+            raise ContractError("receipt idempotency_key does not match active claim")
         self._begin()
         try:
+            claim = self.connection.execute(
+                "SELECT payload_json FROM intake_receipts WHERE idempotency_key=? AND status='processing' AND claim_token=?",
+                (idempotency_key, claim_token),
+            ).fetchone()
+            if claim is None:
+                raise RuntimeError("claim is stale, foreign, or already finalized")
+            payload = _payload_object(claim["payload_json"])
+            expected_source = {
+                "gmail_thread_id": payload["gmail_thread_id"],
+                "gmail_message_ids": sorted(set(payload["gmail_message_ids"])),
+            }
+            if receipt["source"] != expected_source:
+                raise ContractError("receipt source does not match active claim")
             stored = dict(receipt)
             stored["idempotent_replay"] = False
             status = stored.get("status", "completed")
