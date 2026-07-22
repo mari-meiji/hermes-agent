@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
@@ -61,12 +62,18 @@ class ReviewLedger:
           gmail_thread_id TEXT NOT NULL, expires_at TEXT NOT NULL, thread_id TEXT
         );
         CREATE TABLE IF NOT EXISTS review_actions (
-          event_id TEXT PRIMARY KEY, pending_capture_id TEXT NOT NULL, result_json TEXT NOT NULL
+          event_id TEXT PRIMARY KEY, pending_capture_id TEXT NOT NULL,
+          action_fingerprint TEXT NOT NULL UNIQUE, result_json TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS reminders (
           pending_capture_id TEXT NOT NULL, kind TEXT NOT NULL, sent_at TEXT, PRIMARY KEY(pending_capture_id, kind)
         );
         """)
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(review_actions)")}
+        if "action_fingerprint" not in columns:
+            self.connection.execute("ALTER TABLE review_actions ADD COLUMN action_fingerprint TEXT")
+            self.connection.execute("UPDATE review_actions SET action_fingerprint=event_id WHERE action_fingerprint IS NULL")
+        self.connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS review_actions_fingerprint_unique ON review_actions(action_fingerprint)")
 
     def close(self) -> None:
         self.connection.close()
@@ -127,36 +134,68 @@ class ReviewWorkflow:
             pending_capture_id=event["pending_capture_id"], version=event["version"],
             now=self.now(), adam_id=self.adam_id, signing_key=self.signing_key,
         )
+        if event["action"] not in {"approve", "reject", "request_safer_summary"}:
+            raise RestrictedSurfaceError("unsupported review action")
+
+        fingerprint = hashlib.sha256(event["token"].encode("ascii")).hexdigest()
+        processing = {"status": "processing", "pending_capture_id": event["pending_capture_id"], "action": event["action"]}
         self.ledger.connection.execute("BEGIN IMMEDIATE")
         try:
             existing = self.ledger.connection.execute("SELECT result_json FROM review_actions WHERE event_id=?", (event["event_id"],)).fetchone()
             if existing:
                 self.ledger.connection.commit()
                 return json.loads(existing["result_json"])
-            row = self.ledger.pending(event["pending_capture_id"])
-            if row is None or row["state"] != "pending" or row["version"] != event["version"] or event["actor_id"] != self.adam_id:
-                raise RestrictedSurfaceError("stale or unauthorized review action")
-            if event["action"] not in {"approve", "reject", "request_safer_summary"}:
-                raise RestrictedSurfaceError("unsupported review action")
-            processing = {"status": "processing", "pending_capture_id": event["pending_capture_id"], "action": event["action"]}
-            self.ledger.connection.execute("INSERT INTO review_actions VALUES (?, ?, ?)", (event["event_id"], event["pending_capture_id"], json.dumps(processing, sort_keys=True)))
+            claim = self.ledger.connection.execute(
+                "UPDATE pending_reviews SET state='resolving' "
+                "WHERE pending_capture_id=? AND state='pending' AND version=? AND expires_at > ?",
+                (event["pending_capture_id"], event["version"], self.now()),
+            )
+            if claim.rowcount != 1:
+                row = self.ledger.pending(event["pending_capture_id"])
+                self.ledger.connection.rollback()
+                if row is not None and row["state"] == "pending" and _parse(row["expires_at"]) <= _parse(self.now()):
+                    raise RestrictedSurfaceError("review action is expired")
+                raise RestrictedSurfaceError("stale or already claimed review action")
+            self.ledger.connection.execute(
+                "INSERT INTO review_actions (event_id, pending_capture_id, action_fingerprint, result_json) VALUES (?, ?, ?, ?)",
+                (event["event_id"], event["pending_capture_id"], fingerprint, json.dumps(processing, sort_keys=True)),
+            )
             self.ledger.connection.commit()
         except Exception:
             self.ledger.connection.rollback()
             raise
+
         invocation = {"operation": "email_brain_resolve_review", "schema_version": "1.0", "payload": {"pending_capture_id": event["pending_capture_id"], "action": event["action"], "approval_event_id": event["event_id"], "expected_pending_capture_version": event["version"]}}
-        terminal = self.resolution_submitter(invocation)
-        result = {"status": terminal["status"], "pending_capture_id": event["pending_capture_id"], "action": event["action"]}
+        try:
+            terminal = self.resolution_submitter(invocation)
+            result = {"status": terminal["status"], "pending_capture_id": event["pending_capture_id"], "action": event["action"]}
+        except Exception as exc:
+            failed = {"status": "failed_retryable", "pending_capture_id": event["pending_capture_id"], "action": event["action"]}
+            self.ledger.connection.execute("BEGIN IMMEDIATE")
+            try:
+                self.ledger.connection.execute("UPDATE review_actions SET result_json=? WHERE event_id=?", (json.dumps(failed, sort_keys=True), event["event_id"]))
+                self.ledger.connection.commit()
+            except Exception:
+                self.ledger.connection.rollback()
+                raise
+            raise RestrictedSurfaceError("resolution submission failed after durable claim") from exc
+
         next_state = "approved" if event["action"] == "approve" else "rejected"
         self.ledger.connection.execute("BEGIN IMMEDIATE")
         try:
-            self.ledger.connection.execute("UPDATE pending_reviews SET state=? WHERE pending_capture_id=? AND state='pending' AND version=?", (next_state, event["pending_capture_id"], event["version"]))
+            finalized = self.ledger.connection.execute(
+                "UPDATE pending_reviews SET state=? WHERE pending_capture_id=? AND state='resolving' AND version=?",
+                (next_state, event["pending_capture_id"], event["version"]),
+            )
+            if finalized.rowcount != 1:
+                raise RuntimeError("durable review claim was lost")
             self.ledger.connection.execute("UPDATE review_actions SET result_json=? WHERE event_id=?", (json.dumps(result, sort_keys=True), event["event_id"]))
             self.ledger.connection.commit()
         except Exception:
             self.ledger.connection.rollback()
             raise
-        if row["thread_id"]:
+        row = self.ledger.pending(event["pending_capture_id"])
+        if row and row["thread_id"]:
             self._post(row["thread_id"], f"Review resolved: {next_state}.", mentions=[])
         return result
 
@@ -166,7 +205,19 @@ class ReviewWorkflow:
             opened = _parse(row["expires_at"]) - timedelta(days=7)
             age = _parse(now) - opened
             if _parse(now) >= _parse(row["expires_at"]):
-                self.ledger.connection.execute("UPDATE pending_reviews SET state='expired' WHERE pending_capture_id=? AND state='pending'", (row["pending_capture_id"],))
+                self.ledger.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    expired = self.ledger.connection.execute(
+                        "UPDATE pending_reviews SET state='expired' "
+                        "WHERE pending_capture_id=? AND state='pending' AND expires_at <= ?",
+                        (row["pending_capture_id"], now),
+                    )
+                    self.ledger.connection.commit()
+                except Exception:
+                    self.ledger.connection.rollback()
+                    raise
+                if expired.rowcount != 1:
+                    continue
                 if row["thread_id"]:
                     self._post(row["thread_id"], "Review expired without capture.", mentions=[])
                     self.transport.archive(row["thread_id"])
